@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+
+import click
+import openshift as oc
+import yaml
+import glob
+import os
+
+
+@click.command('ygrep')
+@click.option('-f', '--pattern-file', metavar='pattern_yaml_file',
+              required=False, type=click.Path(exists=True, dir_okay=False),
+              help='Input pattern is within specified file')
+@click.option('-p', '--pattern', metavar='pattern_yaml',
+              required=False, help='Yaml specified on the command line')
+@click.argument('search_path', metavar='DIR', default=os.getcwd(), type=click.Path(exists=True))
+def cli(pattern_file, pattern, search_path):
+
+    to_match_abs = None
+    to_match = oc.Model()
+
+    if pattern_file:
+        to_match_abs = os.path.abspath(pattern_file)
+        with open(to_match_abs, mode='r', encoding='utf-8') as f:
+            to_match = oc.Model(yaml.safe_load(f))
+    elif pattern:
+        to_match = oc.Model(yaml.safe_load(pattern))
+    else:
+        print('Either pattern-file or patern must be specified')
+
+    def run_for_enumeration(files):
+        for yf in files:
+            test_models = dict()
+
+            if os.path.abspath(yf) == to_match_abs:
+                # Skip the input file if we find it
+                continue
+
+            with open(yf, mode='r', encoding='utf-8') as yf_handle:
+                for si, subdoc in enumerate(yaml.safe_load_all(yf_handle)):
+
+                    yaml_path = yf
+                    if si > 0:
+                        yaml_path = f"{yf} --- #{si + 1}"
+
+                    if oc.util.is_collection_type(subdoc):
+                        # yaml file is a list - don't try to parse as API object
+                        test_models[yaml_path] = oc.ListModel(subdoc)
+                        continue
+
+                    test_obj = oc.APIObject(subdoc)
+                    if not test_obj.kind(if_missing=None):
+                        # Not a recognized kind - just assume it is not a k8s List
+                        test_models[yaml_path] = test_obj.model
+                    else:
+                        if test_obj.is_kind('List'):
+                            test_models[yaml_path] = test_obj.model  # Add the whole list for analysis
+                            for i, element in enumerate(test_obj.elements()):   # As well as all elements
+                                element_path = f'{yaml_path}, element {i+1}'
+                                test_models[element_path] = element.model
+                        else:
+                            test_models[yaml_path] = test_obj.model  # Add the whole list for analysis
+
+            for filename, model in test_models.items():
+                if model.can_match(to_match):
+                    print(f'Found matching pattern in {filename}')
+
+    run_for_enumeration(glob.iglob(f'{search_path}/**/*.yaml', recursive=True))
+    run_for_enumeration(glob.iglob(f'{search_path}/**/*.yml', recursive=True))
+
+
+if __name__ == '__main__':
+    cli()
